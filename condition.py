@@ -6,4 +6,4 @@ def should_continue(state:CompanionState):
     if (state.get("quit", False)):
         return END
     
-    return "mock_llm_node"
+    return "llm_node"

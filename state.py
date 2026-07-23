@@ -1,5 +1,7 @@
-from typing_extensions import TypedDict
+from typing import TypedDict, Annotated
+from langgraph.graph.message import add_messages
+
 
 class CompanionState(TypedDict):
-    input : str
     quit : bool
+    messages : Annotated[list, add_messages]
