@@ -16,7 +16,7 @@ def llm_node(state: CompanionState):
         content = chunk.content
         for block in content:
             text = block.get("text", "")
-            print((text), end="", flush=True)
+            # print((text), end="", flush=True)
             full_response += text
     print()    
     return {"messages" : [AIMessage(content = full_response)]}
