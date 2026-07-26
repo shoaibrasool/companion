@@ -14,4 +14,4 @@ graph.add_edge("llm_node", "input_node")
 
 graph = graph.compile()
 
-graph.invoke({"input" : ""})
+graph.invoke({})
