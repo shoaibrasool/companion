@@ -28,5 +28,5 @@ chat_history = load_chat_history()
 
 graph.invoke({
     "quit": False,
-    "messages": chat_history[-30:]
+    "messages": chat_history
 })
