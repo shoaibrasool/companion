@@ -30,5 +30,5 @@ print(f"chat history {chat_history}")
 
 graph.invoke({
     "quit": False,
-    "messages": chat_history
+    "messages": chat_history[-30:]
 })
