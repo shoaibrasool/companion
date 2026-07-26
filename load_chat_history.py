@@ -6,20 +6,8 @@ from sqlalchemy import select
 def load_chat_history():
     db = SessionLocal()
     try:
-        
-        subquery = (
-            select(Message)
-            .order_by(Message.created_at.desc())
-            .limit(30)
-            .subquery()
-        )
-        
-        db_messages = (
-            db.query(Message)
-            .filter(Message.id.in_(select(subquery.c.id)))
-            .order_by(Message.created_at.asc())
-            .all()
-        )
+        db_messages_inverse = db.query(Message).order_by(Message.created_at.desc()).limit(30).all()
+        db_messages = list(reversed(db_messages_inverse))
         history = []
         
         for msg in db_messages:
