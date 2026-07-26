@@ -26,8 +26,6 @@ graph = graph.compile()
 
 chat_history = load_chat_history() 
 
-print(f"chat history {chat_history}")
-
 graph.invoke({
     "quit": False,
     "messages": chat_history[-30:]

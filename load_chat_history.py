@@ -1,11 +1,25 @@
 from langchain_core.messages import AIMessage, HumanMessage
 from database import SessionLocal
 from models import Message
+from sqlalchemy import select
 
 def load_chat_history():
     db = SessionLocal()
     try:
-        db_messages = db.query(Message).order_by(Message.created_at.asc()).all()
+        
+        subquery = (
+            select(Message)
+            .order_by(Message.created_at.desc())
+            .limit(30)
+            .subquery()
+        )
+        
+        db_messages = (
+            db.query(Message)
+            .filter(Message.id.in_(select(subquery.c.id)))
+            .order_by(Message.created_at.asc())
+            .all()
+        )
         history = []
         
         for msg in db_messages:
