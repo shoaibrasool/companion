@@ -32,7 +32,6 @@ async def health():
 @app.websocket("/ws/{session_id}")
 async def chat_websocket(websocket: WebSocket, session_id: str):
     await websocket.accept()
-    config = {"configurable": {"thread_id": session_id}}
     history_loaded = False
 
     try:
@@ -50,7 +49,6 @@ async def chat_websocket(websocket: WebSocket, session_id: str):
 
             async for chunk in graph.astream(
                 input_state,
-                config=config,
                 stream_mode="custom",
                 version="v2",
             ):
