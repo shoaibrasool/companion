@@ -12,7 +12,6 @@ import base64
 import re
 from concurrent.futures import ThreadPoolExecutor
 
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
