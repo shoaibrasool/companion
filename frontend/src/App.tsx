@@ -116,6 +116,12 @@ function App() {
   const streamRef = useRef<MediaStream | null>(null)
   const chunksRef = useRef<Float32Array[]>([])
 
+  const playbackCtxRef = useRef<AudioContext | null>(null)
+  const pendingRef = useRef<ArrayBuffer[]>([])
+  const nextStartTimeRef = useRef<number>(0)
+  const isProcessingRef = useRef(false)
+  const isPlaybackClosedRef = useRef(false)
+
   const scrollToBottom = useCallback(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "instant" })
   }, [])
@@ -131,6 +137,64 @@ function App() {
       .then(() => setBackendReady(true))
       .catch(() => setBackendReady(false))
   }, [])
+
+  const clearAudioQueue = useCallback(() => {
+    pendingRef.current = []
+    isProcessingRef.current = false
+    if (playbackCtxRef.current && playbackCtxRef.current.state !== "closed") {
+      playbackCtxRef.current.close()
+    }
+    playbackCtxRef.current = null
+    nextStartTimeRef.current = 0
+    isPlaybackClosedRef.current = true
+  }, [])
+
+  const processNext = useCallback(() => {
+    if (isProcessingRef.current) return
+    if (pendingRef.current.length === 0) return
+
+    isProcessingRef.current = true
+    const buffer = pendingRef.current.shift()!
+
+    if (!playbackCtxRef.current || playbackCtxRef.current.state === "closed") {
+      playbackCtxRef.current = new AudioContext()
+      nextStartTimeRef.current = 0
+    }
+
+    const ctx = playbackCtxRef.current
+    if (ctx.state === "suspended") {
+      ctx.resume()
+    }
+
+    ctx.decodeAudioData(buffer.slice(0))
+      .then((decoded) => {
+        const source = ctx.createBufferSource()
+        source.buffer = decoded
+        source.connect(ctx.destination)
+
+        const now = ctx.currentTime
+        const startTime = Math.max(now, nextStartTimeRef.current)
+        source.start(startTime)
+        nextStartTimeRef.current = startTime + decoded.duration
+      })
+      .catch((err) => {
+        console.error("Audio decode error:", err)
+      })
+      .finally(() => {
+        isProcessingRef.current = false
+        processNext()
+      })
+  }, [])
+
+  const sendAudio = useCallback((b64: string) => {
+    const binaryStr = atob(b64)
+    const bytes = new Uint8Array(binaryStr.length)
+    for (let i = 0; i < binaryStr.length; i++) {
+      bytes[i] = binaryStr.charCodeAt(i)
+    }
+    pendingRef.current.push(bytes.buffer)
+    processNext()
+  }, [processNext])
 
   useEffect(() => {
     if (!backendReady) return
@@ -150,19 +214,33 @@ function App() {
         dispatch({ type: "token", content: data.content })
       } else if (data.type === "done") {
         dispatch({ type: "done" })
+      } else if (data.type === "audio") {
+        sendAudio(data.content)
       }
     }
 
     return () => ws.close()
-  }, [backendReady])
+  }, [backendReady, sendAudio])
 
   const sendMessage = useCallback(() => {
     const text = inputText.trim()
     if (!text || !wsRef.current) return
+
+    clearAudioQueue()
+
+    if (!playbackCtxRef.current || playbackCtxRef.current.state === "closed") {
+      playbackCtxRef.current = new AudioContext()
+      nextStartTimeRef.current = 0
+    }
+    const ctx = playbackCtxRef.current
+    if (ctx.state === "suspended") {
+      ctx.resume()
+    }
+
     wsRef.current.send(text)
     dispatch({ type: "send", text })
     setInputText("")
-  }, [inputText])
+  }, [inputText, clearAudioQueue])
 
   const startRecording = useCallback(async () => {
     try {
@@ -214,6 +292,17 @@ function App() {
 
     if (combined.length === 0) return
 
+    clearAudioQueue()
+
+    if (!playbackCtxRef.current || playbackCtxRef.current.state === "closed") {
+      playbackCtxRef.current = new AudioContext()
+      nextStartTimeRef.current = 0
+    }
+    const ctx = playbackCtxRef.current
+    if (ctx.state === "suspended") {
+      ctx.resume()
+    }
+
     setIsTranscribing(true)
 
     const wavBlob = encodeWav(combined, TARGET_SR)
@@ -238,7 +327,7 @@ function App() {
     } finally {
       setIsTranscribing(false)
     }
-  }, [])
+  }, [clearAudioQueue])
 
   return (
     <div className="app">
