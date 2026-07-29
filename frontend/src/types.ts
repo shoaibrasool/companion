@@ -12,4 +12,10 @@ export interface DoneMessage {
   type: "done"
 }
 
-export type WebSocketMessage = TokenMessage | DoneMessage
+export interface AudioMessage {
+  type: "audio"
+  content: string
+  format: string
+}
+
+export type WebSocketMessage = TokenMessage | DoneMessage | AudioMessage

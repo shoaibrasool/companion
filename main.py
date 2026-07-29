@@ -1,15 +1,19 @@
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, File, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from graph import graph
 from database import init_db
 from load_chat_history import load_chat_history
 from langchain_core.messages import HumanMessage
+import stt_service
+import tts_service
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
+    stt_service.load_model()
+    tts_service.load_model()
     yield
 
 
@@ -17,7 +21,11 @@ app = FastAPI(lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_origins=[
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+        "http://localhost:3000",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -27,6 +35,13 @@ app.add_middleware(
 @app.get("/health")
 async def health():
     return {"status": "ok"}
+
+
+@app.post("/transcribe")
+async def transcribe(file: UploadFile = File(...)):
+    audio_bytes = await file.read()
+    text = stt_service.transcribe(audio_bytes)
+    return {"text": text}
 
 
 @app.websocket("/ws/{session_id}")
