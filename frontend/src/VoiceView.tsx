@@ -1,13 +1,17 @@
 import { useState, useRef, useCallback, useEffect } from "react"
-
-type VoiceStatus = "idle" | "recording" | "transcribing" | "waiting"
+import type { RefObject } from "react"
+import VoiceButton from "./VoiceButton"
+import type { OrbStatus } from "./VoiceButton"
 
 interface VoiceViewProps {
   isConnected: boolean
   isAiResponding: boolean
+  dark: boolean
   onSendText: (text: string) => void
   clearAudioQueue: () => void
   preparePlayback: () => Promise<unknown>
+  speakLevelRef: RefObject<number>
+  isSpeakingRef: RefObject<boolean>
 }
 
 const TARGET_SR = 16000
@@ -50,17 +54,21 @@ function encodeWav(samples: Float32Array, sampleRate: number): Blob {
 export default function VoiceView({
   isConnected,
   isAiResponding,
+  dark,
   onSendText,
   clearAudioQueue,
   preparePlayback,
+  speakLevelRef,
+  isSpeakingRef,
 }: VoiceViewProps) {
-  const [status, setStatus] = useState<VoiceStatus>("idle")
+  const [status, setStatus] = useState<OrbStatus>("idle")
 
   const audioCtxRef = useRef<AudioContext | null>(null)
   const sourceRef = useRef<MediaStreamAudioSourceNode | null>(null)
   const processorRef = useRef<ScriptProcessorNode | null>(null)
   const streamRef = useRef<MediaStream | null>(null)
   const chunksRef = useRef<Float32Array[]>([])
+  const micLevelRef = useRef(0)
 
   useEffect(() => {
     if (status === "waiting" && !isAiResponding) {
@@ -87,7 +95,12 @@ export default function VoiceView({
       chunksRef.current = []
 
       processor.onaudioprocess = (e: AudioProcessingEvent) => {
-        chunksRef.current.push(new Float32Array(e.inputBuffer.getChannelData(0)))
+        const data = e.inputBuffer.getChannelData(0)
+        let sum = 0
+        for (let i = 0; i < data.length; i++) sum += data[i] * data[i]
+        const rms = Math.sqrt(sum / data.length)
+        micLevelRef.current = micLevelRef.current * 0.6 + rms * 0.4
+        chunksRef.current.push(new Float32Array(data))
       }
 
       source.connect(processor)
@@ -101,6 +114,7 @@ export default function VoiceView({
   }, [preparePlayback])
 
   const stopRecording = useCallback(async () => {
+    micLevelRef.current = 0
     processorRef.current?.disconnect()
     sourceRef.current?.disconnect()
     audioCtxRef.current?.close()
@@ -152,9 +166,9 @@ export default function VoiceView({
   const statusText = () => {
     switch (status) {
       case "idle":
-        return "Tap to speak"
+        return "Hold to speak"
       case "recording":
-        return "Recording..."
+        return "Listening..."
       case "transcribing":
         return "Transcribing..."
       case "waiting":
@@ -162,17 +176,13 @@ export default function VoiceView({
     }
   }
 
-  const circleClass = () => {
-    const base = "voice-circle"
-    if (status === "recording") return `${base} recording`
-    if (status === "waiting") return `${base} waiting`
-    return base
-  }
-
   return (
     <div className="voice-view">
       <div
-        className={circleClass()}
+        className={`orb-wrap ${isConnected ? "" : "disabled"}`}
+        role="button"
+        tabIndex={0}
+        aria-label={status === "recording" ? "Stop recording" : "Hold to speak"}
         onPointerDown={(e) => {
           e.preventDefault()
           if (isConnected && status === "idle") startRecording()
@@ -183,17 +193,24 @@ export default function VoiceView({
         onPointerLeave={() => {
           if (status === "recording") stopRecording()
         }}
+        onPointerCancel={() => {
+          if (status === "recording") stopRecording()
+        }}
+        onKeyDown={(e) => {
+          if (e.key === " " || e.key === "Enter") {
+            e.preventDefault()
+            if (isConnected && status === "idle") startRecording()
+            else if (status === "recording") stopRecording()
+          }
+        }}
       >
-        {status === "recording" ? (
-          <svg viewBox="0 0 24 24" width="40" height="40" fill="white">
-            <rect x="6" y="6" width="12" height="12" rx="2" />
-          </svg>
-        ) : (
-          <svg viewBox="0 0 24 24" width="40" height="40" fill="white">
-            <path d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3z" />
-            <path d="M17 11c0 2.76-2.24 5-5 5s-5-2.24-5-5H5c0 3.53 2.61 6.43 6 6.92V21h2v-3.08c3.39-.49 6-3.39 6-6.92h-2z" />
-          </svg>
-        )}
+        <VoiceButton
+          status={status}
+          dark={dark}
+          micLevelRef={micLevelRef}
+          speakLevelRef={speakLevelRef}
+          isSpeakingRef={isSpeakingRef}
+        />
       </div>
       <p className="voice-status">{statusText()}</p>
     </div>
