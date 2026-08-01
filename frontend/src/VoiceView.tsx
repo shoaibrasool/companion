@@ -7,6 +7,7 @@ interface VoiceViewProps {
   isAiResponding: boolean
   onSendText: (text: string) => void
   clearAudioQueue: () => void
+  preparePlayback: () => Promise<unknown>
 }
 
 const TARGET_SR = 16000
@@ -51,6 +52,7 @@ export default function VoiceView({
   isAiResponding,
   onSendText,
   clearAudioQueue,
+  preparePlayback,
 }: VoiceViewProps) {
   const [status, setStatus] = useState<VoiceStatus>("idle")
 
@@ -68,6 +70,8 @@ export default function VoiceView({
 
   const startRecording = useCallback(async () => {
     try {
+      preparePlayback()
+
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
       streamRef.current = stream
 
@@ -94,7 +98,7 @@ export default function VoiceView({
       console.error("Mic access denied:", err)
       setStatus("idle")
     }
-  }, [])
+  }, [preparePlayback])
 
   const stopRecording = useCallback(async () => {
     processorRef.current?.disconnect()

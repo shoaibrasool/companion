@@ -79,9 +79,10 @@ function App() {
   const wsRef = useRef<WebSocket | null>(null)
 
   const playbackCtxRef = useRef<AudioContext | null>(null)
-  const pendingRef = useRef<ArrayBuffer[]>([])
+  const pendingRef = useRef<{ buffer: ArrayBuffer; index: number }[]>([])
   const nextStartTimeRef = useRef<number>(0)
   const isProcessingRef = useRef(false)
+  const sourcesRef = useRef<AudioBufferSourceNode[]>([])
 
   const isAiResponding = isThinking || pendingText.length > 0
 
@@ -96,57 +97,75 @@ function App() {
   const clearAudioQueue = useCallback(() => {
     pendingRef.current = []
     isProcessingRef.current = false
-    if (playbackCtxRef.current && playbackCtxRef.current.state !== "closed") {
-      playbackCtxRef.current.close()
+    for (const s of sourcesRef.current) {
+      try {
+        s.stop()
+      } catch {
+        // already finished playing
+      }
     }
-    playbackCtxRef.current = null
+    sourcesRef.current = []
     nextStartTimeRef.current = 0
   }, [])
 
-  const processNext = useCallback(() => {
-    if (isProcessingRef.current) return
-    if (pendingRef.current.length === 0) return
-
-    isProcessingRef.current = true
-    const buffer = pendingRef.current.shift()!
-
+  const ensurePlaybackContext = useCallback(async () => {
     if (!playbackCtxRef.current || playbackCtxRef.current.state === "closed") {
       playbackCtxRef.current = new AudioContext()
       nextStartTimeRef.current = 0
     }
-
     const ctx = playbackCtxRef.current
     if (ctx.state === "suspended") {
-      ctx.resume()
+      await ctx.resume()
     }
-
-    ctx.decodeAudioData(buffer.slice(0))
-      .then((decoded) => {
-        const source = ctx.createBufferSource()
-        source.buffer = decoded
-        source.connect(ctx.destination)
-
-        const now = ctx.currentTime
-        const startTime = Math.max(now, nextStartTimeRef.current)
-        source.start(startTime)
-        nextStartTimeRef.current = startTime + decoded.duration
-      })
-      .catch((err) => {
-        console.error("Audio decode error:", err)
-      })
-      .finally(() => {
-        isProcessingRef.current = false
-        processNext()
-      })
+    return ctx
   }, [])
 
-  const sendAudio = useCallback((b64: string) => {
+  const processNext = useCallback(async () => {
+    if (isProcessingRef.current) return
+    if (pendingRef.current.length === 0) return
+
+    isProcessingRef.current = true
+    const { buffer, index } = pendingRef.current.shift()!
+
+    try {
+      const ctx = await ensurePlaybackContext()
+
+      const decoded = await ctx.decodeAudioData(buffer.slice(0))
+      const source = ctx.createBufferSource()
+      source.buffer = decoded
+      source.connect(ctx.destination)
+      sourcesRef.current.push(source)
+
+      const now = ctx.currentTime
+      const startTime = Math.max(now, nextStartTimeRef.current)
+      source.start(startTime)
+      nextStartTimeRef.current = startTime + decoded.duration
+
+      const wallStart = Date.now()
+      console.log(
+        `[audio] chunk ${index}: SCHEDULED at ${wallStart}ms (ctxTime=${startTime.toFixed(3)}, duration=${decoded.duration.toFixed(2)}s, queueGap=${Math.max(0, startTime - now).toFixed(2)}s)`,
+      )
+      source.onended = () => {
+        console.log(`[audio] chunk ${index}: PLAYED at ${Date.now()}ms (started ${wallStart}ms)`)
+      }
+    } catch (err) {
+      console.error("Audio playback error:", err)
+    } finally {
+      isProcessingRef.current = false
+      processNext()
+    }
+  }, [ensurePlaybackContext])
+
+  const sendAudio = useCallback((b64: string, index: number) => {
     const binaryStr = atob(b64)
     const bytes = new Uint8Array(binaryStr.length)
     for (let i = 0; i < binaryStr.length; i++) {
       bytes[i] = binaryStr.charCodeAt(i)
     }
-    pendingRef.current.push(bytes.buffer)
+    console.log(
+      `[audio] chunk ${index}: RECEIVED at ${Date.now()}ms (${binaryStr.length} bytes)`,
+    )
+    pendingRef.current.push({ buffer: bytes.buffer, index })
     processNext()
   }, [processNext])
 
@@ -169,7 +188,7 @@ function App() {
       } else if (data.type === "done") {
         dispatch({ type: "done" })
       } else if (data.type === "audio" && modeRef.current === "voice") {
-        sendAudio(data.content)
+        sendAudio(data.content, data.index)
       }
     }
 
@@ -180,23 +199,18 @@ function App() {
     if (mode === "chat") clearAudioQueue()
   }, [mode, clearAudioQueue])
 
-  const handleSendText = useCallback((text: string) => {
-    if (!text || !wsRef.current) return
+  const handleSendText = useCallback(
+    (text: string) => {
+      if (!text || !wsRef.current) return
 
-    clearAudioQueue()
+      clearAudioQueue()
+      ensurePlaybackContext()
 
-    if (!playbackCtxRef.current || playbackCtxRef.current.state === "closed") {
-      playbackCtxRef.current = new AudioContext()
-      nextStartTimeRef.current = 0
-    }
-    const ctx = playbackCtxRef.current
-    if (ctx.state === "suspended") {
-      ctx.resume()
-    }
-
-    wsRef.current.send(text)
-    dispatch({ type: "send", text })
-  }, [clearAudioQueue])
+      wsRef.current.send(text)
+      dispatch({ type: "send", text })
+    },
+    [clearAudioQueue, ensurePlaybackContext],
+  )
 
   const handleSendMessage = useCallback(() => {
     handleSendText(inputText.trim())
@@ -245,6 +259,7 @@ function App() {
           isAiResponding={isAiResponding}
           onSendText={handleSendText}
           clearAudioQueue={clearAudioQueue}
+          preparePlayback={ensurePlaybackContext}
         />
       )}
 

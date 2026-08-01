@@ -10,6 +10,7 @@ import tts_service
 import asyncio
 import base64
 import re
+import time
 from concurrent.futures import ThreadPoolExecutor
 
 @asynccontextmanager
@@ -42,80 +43,100 @@ _ABBREVIATIONS = {
     "etc.", "vs.", "dept.", "est.", "govt.",
 }
 
+# Mirrors the standalone TTS pipeline: split after ., !, ?, ,, ; while
+# keeping the punctuation attached to the preceding chunk.
+_SENTENCE_BOUNDARY = re.compile(r"(?<=[.!?,;]) +")
+
+_MAX_CHARS = 70
+_MIN_FLUSH_CHARS = 3
+
 
 def _is_abbreviation(word: str) -> bool:
     return word.lower().rstrip(")") in _ABBREVIATIONS
 
 
-def _find_split(remaining: str, max_chars: int, min_chars: int) -> int:
-    sentence_delims = re.compile(r"(?<=[.!?])\s+")
-    clause_delims = re.compile(r"(?<=[,;:])\s+")
-    space_delims = re.compile(r"\s+")
+def _split_ready_chunks(buffer: str) -> tuple[str, list[str]]:
+    """Pop completed sentences out of the streaming token buffer.
 
-    for m in reversed(list(sentence_delims.finditer(remaining))):
-        pos = m.start()
-        if pos > max_chars:
-            continue
-        prev_word = remaining[:pos].rstrip().split()[-1] if pos > 0 else ""
-        if _is_abbreviation(prev_word):
-            continue
-        return pos
-
-    for m in reversed(list(clause_delims.finditer(remaining))):
-        pos = m.start()
-        if pos > max_chars or pos < min_chars:
-            continue
-        return pos
-
-    for m in reversed(list(space_delims.finditer(remaining))):
-        pos = m.start()
-        if pos > max_chars or pos < min_chars:
-            continue
-        return pos
-
-    return min(len(remaining), max(max_chars, min_chars))
-
-
-def _extract_chunks(text: str, target: int = 55, max_chars: int = 70, min_chars: int = 0) -> list[str]:
-    if len(text) <= max_chars:
-        return [text]
-
-    chunks = []
-    remaining = text
-
-    while len(remaining) > max_chars:
-        pos = _find_split(remaining, max_chars, min_chars)
-        chunk = remaining[:pos].strip()
-        if chunk:
-            chunks.append(chunk)
-        remaining = remaining[pos:].strip()
-        if not remaining:
+    Returns (remaining_buffer, ready_chunks). A sentence is ready as soon
+    as its punctuation is followed by whitespace, so chunks are dispatched
+    to TTS the moment they exist instead of waiting for an accumulation
+    target.
+    """
+    ready: list[str] = []
+    remaining = buffer
+    while True:
+        valid = None
+        for m in _SENTENCE_BOUNDARY.finditer(remaining):
+            prev = remaining[:m.start()].rstrip()
+            if prev and _is_abbreviation(prev.split()[-1]):
+                continue
+            valid = m
             break
+        if valid is None:
+            break
+        chunk = remaining[:valid.start()].strip()
+        if chunk:
+            ready.append(chunk)
+        remaining = remaining[valid.end():].lstrip()
+    return remaining, ready
 
-    if remaining:
-        chunks.append(remaining)
 
-    return chunks
+def _hard_split(text: str, max_chars: int) -> tuple[str, list[str]]:
+    """Fallback for one long sentence with no punctuation boundary."""
+    ready: list[str] = []
+    remaining = text
+    while len(remaining) > max_chars:
+        pos = remaining.rfind(" ", 0, max_chars)
+        if pos <= max_chars // 2:
+            pos = max_chars
+        ready.append(remaining[:pos].strip())
+        remaining = remaining[pos:].strip()
+    return remaining, ready
 
 
 class OrderedAudioSender:
-    def __init__(self, websocket: WebSocket):
-        self._ws = websocket
-        self._lock = asyncio.Lock()
+    """Audio chunks are produced by TTS tasks and sent in index order by a
+    single owner task, so one failing chunk can never stall the rest."""
+
+    def __init__(self):
+        self._queue: asyncio.Queue[tuple[int, str]] = asyncio.Queue()
         self._pending: dict[int, str] = {}
         self._next_index = 0
 
-    async def submit(self, index: int, b64_audio: str):
-        async with self._lock:
-            self._pending[index] = b64_audio
+    async def run(self, websocket: WebSocket):
+        while True:
+            index, b64 = await self._queue.get()
+            if index < self._next_index:
+                print(
+                    f"[TTS] chunk {index}: STALE DROP (next expected {self._next_index})",
+                    flush=True,
+                )
+                continue
+            self._pending[index] = b64
             while self._next_index in self._pending:
                 data = self._pending.pop(self._next_index)
-                await self._ws.send_json({
-                    "type": "audio",
-                    "content": data,
-                    "format": "wav",
-                })
+                try:
+                    await websocket.send_json({
+                        "type": "audio",
+                        "content": data,
+                        "format": "wav",
+                        "index": self._next_index,
+                    })
+                except Exception as e:
+                    print(
+                        f"[TTS] chunk {self._next_index}: SEND FAILED: {e} (skipped)",
+                        flush=True,
+                    )
+                else:
+                    print(
+                        f"[TTS] chunk {self._next_index}: SENT at {time.time():.3f}s",
+                        flush=True,
+                    )
                 self._next_index += 1
+
+    async def submit(self, index: int, b64_audio: str):
+        await self._queue.put((index, b64_audio))
 
 
 def _synthesize_to_b64(text: str) -> str:
@@ -128,12 +149,26 @@ async def _run_tts_task(
     index: int,
     text: str,
 ):
-    print(f"[TTS] chunk {index}: start ({len(text)} chars: {text[:40]}...)", flush=True)
+    t_start = time.perf_counter()
+    print(
+        f"[TTS] chunk {index}: DISPATCH at {time.time():.3f}s ({len(text)} chars: {text[:40]}...)",
+        flush=True,
+    )
     try:
         loop = asyncio.get_running_loop()
         b64 = await loop.run_in_executor(_tts_executor, _synthesize_to_b64, text)
+        print(
+            f"[TTS] chunk {index}: GENERATED at {time.time():.3f}s (synth took {time.perf_counter() - t_start:.2f}s)",
+            flush=True,
+        )
         await sender.submit(index, b64)
-        print(f"[TTS] chunk {index}: done", flush=True)
+        print(
+            f"[TTS] chunk {index}: QUEUED at {time.time():.3f}s",
+            flush=True,
+        )
+    except asyncio.CancelledError:
+        print(f"[TTS] chunk {index}: CANCELLED", flush=True)
+        raise
     except Exception as e:
         print(f"[TTS] chunk {index}: FAILED: {e}", flush=True)
 
@@ -154,8 +189,10 @@ async def transcribe(file: UploadFile = File(...)):
 async def chat_websocket(websocket: WebSocket, session_id: str):
     await websocket.accept()
     history_loaded = False
-    sender = OrderedAudioSender(websocket)
+    sender = OrderedAudioSender()
+    sender_task = asyncio.create_task(sender.run(websocket))
     tts_tasks: list[asyncio.Task] = []
+    chunk_index = 0
 
     try:
         while True:
@@ -174,13 +211,8 @@ async def chat_websocket(websocket: WebSocket, session_id: str):
             else:
                 input_state = {"messages": [msg]}
 
-            TARGET = 55
-            MAX_CHARS = 70
-            MIN_CHARS_FINAL = 25
-
             full_text = ""
             token_acc = ""
-            chunk_index = 0
 
             async for chunk in graph.astream(
                 input_state,
@@ -196,17 +228,17 @@ async def chat_websocket(websocket: WebSocket, session_id: str):
                         "content": content,
                     })
 
-                    if len(token_acc) >= TARGET:
-                        acc_chunks = _extract_chunks(token_acc, target=TARGET, max_chars=MAX_CHARS)
-                        if acc_chunks:
-                            chunk_text = acc_chunks[0]
-                            token_acc = token_acc[len(chunk_text):].strip()
-                            task = asyncio.create_task(
-                                _run_tts_task(sender, chunk_index, chunk_text)
-                            )
-                            tts_tasks.append(task)
-                            chunk_index += 1
-                            print(f"[TTS] streaming chunk {chunk_index - 1}: {len(chunk_text)} chars: {chunk_text[:40]}...", flush=True)
+                    token_acc, ready = _split_ready_chunks(token_acc)
+                    if len(token_acc) > _MAX_CHARS:
+                        token_acc, hard = _hard_split(token_acc, _MAX_CHARS)
+                        ready.extend(hard)
+
+                    for c in ready:
+                        task = asyncio.create_task(
+                            _run_tts_task(sender, chunk_index, c)
+                        )
+                        tts_tasks.append(task)
+                        chunk_index += 1
 
             print(f"[TTS] streaming done, full text ({len(full_text)} chars): {full_text[:80]}...", flush=True)
 
@@ -217,15 +249,22 @@ async def chat_websocket(websocket: WebSocket, session_id: str):
                 await websocket.send_json({"type": "done"})
                 continue
 
-            if token_acc:
-                remainder_chunks = _extract_chunks(token_acc, target=TARGET, max_chars=MAX_CHARS, min_chars=MIN_CHARS_FINAL)
-                print(f"[TTS] remainder: {len(remainder_chunks)} chunks: {[f'{i}({len(c)})' for i, c in enumerate(remainder_chunks)]}", flush=True)
-                for c in remainder_chunks:
+            if len(token_acc) > _MAX_CHARS:
+                token_acc, hard = _hard_split(token_acc, _MAX_CHARS)
+                for c in hard:
                     task = asyncio.create_task(
                         _run_tts_task(sender, chunk_index, c)
                     )
                     tts_tasks.append(task)
                     chunk_index += 1
+
+            remainder = token_acc.strip()
+            if len(remainder) >= _MIN_FLUSH_CHARS:
+                task = asyncio.create_task(
+                    _run_tts_task(sender, chunk_index, remainder)
+                )
+                tts_tasks.append(task)
+                chunk_index += 1
 
             if tts_tasks:
                 done_tasks, _ = await asyncio.wait(tts_tasks)
@@ -236,4 +275,5 @@ async def chat_websocket(websocket: WebSocket, session_id: str):
     except WebSocketDisconnect:
         for t in tts_tasks:
             t.cancel()
-        pass
+    finally:
+        sender_task.cancel()

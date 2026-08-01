@@ -16,6 +16,7 @@ export interface AudioMessage {
   type: "audio"
   content: string
   format: string
+  index: number
 }
 
 export type WebSocketMessage = TokenMessage | DoneMessage | AudioMessage
