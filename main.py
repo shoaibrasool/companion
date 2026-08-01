@@ -2,7 +2,8 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, File, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from graph import graph
-from database import init_db
+from database import init_db, SessionLocal
+from models import Message
 from load_chat_history import load_chat_history
 from langchain_core.messages import HumanMessage
 import stt_service
@@ -176,6 +177,21 @@ async def _run_tts_task(
 @app.get("/health")
 async def health():
     return {"status": "ok"}
+
+
+@app.get("/history")
+async def history():
+    db = SessionLocal()
+    try:
+        db_messages_inverse = db.query(Message).order_by(Message.created_at.desc(), Message.id.desc()).limit(30).all()
+        db_messages = list(reversed(db_messages_inverse))
+        return [
+            {"role": msg.role, "content": msg.content}
+            for msg in db_messages
+            if msg.role in ("human", "ai")
+        ]
+    finally:
+        db.close()
 
 
 @app.post("/transcribe")

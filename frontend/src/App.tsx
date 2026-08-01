@@ -5,6 +5,13 @@ import VoiceView from "./VoiceView"
 import "./App.css"
 
 type Mode = "chat" | "voice"
+type Theme = "light" | "dark"
+
+function getInitialTheme(): Theme {
+  const stored = localStorage.getItem("companion_theme")
+  if (stored === "light" || stored === "dark") return stored
+  return "light"
+}
 
 function getSessionId(): string {
   const stored = localStorage.getItem("companion_session_id")
@@ -24,6 +31,7 @@ type Action =
   | { type: "token"; content: string }
   | { type: "done" }
   | { type: "send"; text: string }
+  | { type: "history"; messages: Message[] }
 
 const initialChatState: ChatState = {
   messages: [],
@@ -59,6 +67,13 @@ function chatReducer(state: ChatState, action: Action): ChatState {
         pendingText: "",
         isThinking: true,
       }
+    case "history":
+      return {
+        ...state,
+        messages: action.messages,
+        pendingText: "",
+        isThinking: false,
+      }
   }
 }
 
@@ -72,9 +87,12 @@ function App() {
     chatReducer,
     initialChatState,
   )
+  const messagesRef = useRef(messages)
+  messagesRef.current = messages
   const [inputText, setInputText] = useState("")
   const [isConnected, setIsConnected] = useState(false)
   const [backendReady, setBackendReady] = useState(false)
+  const [theme, setTheme] = useState<Theme>(getInitialTheme)
 
   const wsRef = useRef<WebSocket | null>(null)
 
@@ -83,8 +101,18 @@ function App() {
   const nextStartTimeRef = useRef<number>(0)
   const isProcessingRef = useRef(false)
   const sourcesRef = useRef<AudioBufferSourceNode[]>([])
+  const analyserRef = useRef<AnalyserNode | null>(null)
+  const speakLevelRef = useRef(0)
+  const isSpeakingRef = useRef(false)
 
   const isAiResponding = isThinking || pendingText.length > 0
+
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme
+    localStorage.setItem("companion_theme", theme)
+    const meta = document.querySelector('meta[name="theme-color"]')
+    meta?.setAttribute("content", theme === "dark" ? "#171310" : "#f5f2ec")
+  }, [theme])
 
   useEffect(() => {
     const baseUrl = import.meta.env.VITE_API_URL || "http://localhost:8000"
@@ -93,6 +121,20 @@ function App() {
       .then(() => setBackendReady(true))
       .catch(() => setBackendReady(false))
   }, [])
+
+  useEffect(() => {
+    if (!backendReady) return
+
+    const baseUrl = import.meta.env.VITE_API_URL || "http://localhost:8000"
+    fetch(`${baseUrl}/history`)
+      .then((res) => res.json())
+      .then((history: Message[]) => {
+        if (messagesRef.current.length === 0) {
+          dispatch({ type: "history", messages: history })
+        }
+      })
+      .catch((err) => console.error("Failed to load chat history:", err))
+  }, [backendReady])
 
   const clearAudioQueue = useCallback(() => {
     pendingRef.current = []
@@ -133,7 +175,12 @@ function App() {
       const decoded = await ctx.decodeAudioData(buffer.slice(0))
       const source = ctx.createBufferSource()
       source.buffer = decoded
-      source.connect(ctx.destination)
+      const analyser = ctx.createAnalyser()
+      analyser.fftSize = 512
+      analyser.smoothingTimeConstant = 0.35
+      source.connect(analyser)
+      analyser.connect(ctx.destination)
+      analyserRef.current = analyser
       sourcesRef.current.push(source)
 
       const now = ctx.currentTime
@@ -146,6 +193,7 @@ function App() {
         `[audio] chunk ${index}: SCHEDULED at ${wallStart}ms (ctxTime=${startTime.toFixed(3)}, duration=${decoded.duration.toFixed(2)}s, queueGap=${Math.max(0, startTime - now).toFixed(2)}s)`,
       )
       source.onended = () => {
+        sourcesRef.current = sourcesRef.current.filter((s) => s !== source)
         console.log(`[audio] chunk ${index}: PLAYED at ${Date.now()}ms (started ${wallStart}ms)`)
       }
     } catch (err) {
@@ -196,6 +244,23 @@ function App() {
   }, [backendReady, sendAudio])
 
   useEffect(() => {
+    const id = setInterval(() => {
+      const analyser = analyserRef.current
+      if (analyser) {
+        const data = new Float32Array(analyser.fftSize)
+        analyser.getFloatTimeDomainData(data)
+        let sum = 0
+        for (let i = 0; i < data.length; i++) sum += data[i] * data[i]
+        speakLevelRef.current = Math.sqrt(sum / data.length)
+      } else {
+        speakLevelRef.current = 0
+      }
+      isSpeakingRef.current = sourcesRef.current.length > 0
+    }, 100)
+    return () => clearInterval(id)
+  }, [])
+
+  useEffect(() => {
     if (mode === "chat") clearAudioQueue()
   }, [mode, clearAudioQueue])
 
@@ -236,6 +301,36 @@ function App() {
               Voice
             </button>
           </div>
+          <button
+            className="theme-toggle"
+            onClick={() => setTheme(theme === "dark" ? "light" : "dark")}
+            aria-label="Toggle theme"
+            title={theme === "dark" ? "Switch to light theme" : "Switch to dark theme"}
+          >
+            {theme === "dark" ? (
+              <svg
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+              >
+                <circle cx="12" cy="12" r="4" />
+                <path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41" />
+              </svg>
+            ) : (
+              <svg
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              >
+                <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
+              </svg>
+            )}
+          </button>
           <div className="status-group">
             <span className={`status-dot ${isConnected ? "connected" : "disconnected"}`} />
             <span className="session-id">session: {sessionId.current.slice(0, 8)}</span>
@@ -257,9 +352,12 @@ function App() {
         <VoiceView
           isConnected={isConnected}
           isAiResponding={isAiResponding}
+          dark={theme === "dark"}
           onSendText={handleSendText}
           clearAudioQueue={clearAudioQueue}
           preparePlayback={ensurePlaybackContext}
+          speakLevelRef={speakLevelRef}
+          isSpeakingRef={isSpeakingRef}
         />
       )}
 
