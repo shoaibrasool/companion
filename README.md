@@ -13,15 +13,28 @@ A voice-based AI companion built with FastAPI, LangGraph, and a Vite/React front
 
 ## Architecture
 
-- `main.py` — FastAPI app; WebSocket endpoint (`/ws/{session_id}`), transcription endpoint, ordered streaming TTS sender
-- `graph.py` — LangGraph state graph (`llm_node` -> `persist_data_node`)
-- `llm_node.py` — streams tokens from Google Gemini (`gemini-3.1-flash-lite`) into the graph stream
-- `stt_service.py` — Moonshine ASR model (resamples to 16 kHz)
-- `tts_service.py` — Kokoro ONNX TTS, WAV output
-- `database.py` / `persist_data.py` — SQLite persistence for chat history
-- `load_chat_history.py` — loads prior messages at session start
-- `run.py` — starts uvicorn (port 8000) and the Vite dev server (port 5173)
+```
+backend/
+├── main.py                FastAPI app; REST + WebSocket endpoints
+├── run.py                 dev runner (uvicorn + Vite)
+├── core/
+│   ├── config.py          repo paths, env loading, DB URL
+│   ├── db.py              SQLite engine, session, Message model
+│   └── chat_history.py    loads prior messages at session start
+├── agent/
+│   ├── graph.py           LangGraph state graph (llm_node -> persist_data_node)
+│   ├── state.py           graph state type
+│   ├── llm_node.py        streams tokens from Google Gemini (gemini-3.1-flash-lite)
+│   ├── persist_node.py    SQLite persistence for chat history
+│   └── system_prompt.py   companion system prompt
+└── services/
+    ├── stt.py             Moonshine ASR model (resamples to 16 kHz)
+    ├── tts.py             Kokoro ONNX TTS, WAV output
+    └── audio_stream.py    ordered streaming TTS sender + sentence chunking
+```
+
 - `frontend/` — Vite + React client
+- `models/` — Kokoro ONNX model files (gitignored)
 
 ## Prerequisites
 
@@ -51,14 +64,14 @@ models/voices-v1.0.bin
 ## Running
 
 ```bash
-python run.py
+python backend/run.py
 ```
 
 Or run separately:
 
 ```bash
-uvicorn main:app --reload --port 8000   # backend
-cd frontend && npm install && npm run dev  # frontend
+uvicorn backend.main:app --reload --port 8000  # backend (from repo root)
+cd frontend && npm install && npm run dev       # frontend
 ```
 
 - Frontend: http://localhost:5173
