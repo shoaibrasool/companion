@@ -1,15 +1,17 @@
-import os
 import io
+
 import soundfile as sf
 from kokoro_onnx import Kokoro
 
-_model_dir = os.path.join(os.path.dirname(__file__), "models")
+from backend.core.config import MODELS_DIR
+
 _kokoro = None
+
 
 def load_model():
     global _kokoro
-    onnx_path = os.path.join(_model_dir, "kokoro-v1.0.onnx")
-    voices_path = os.path.join(_model_dir, "voices-v1.0.bin")
+    onnx_path = MODELS_DIR / "kokoro-v1.0.onnx"
+    voices_path = MODELS_DIR / "voices-v1.0.bin"
     _kokoro = Kokoro(onnx_path, voices_path)
 
 def synthesize(text: str) -> bytes:
